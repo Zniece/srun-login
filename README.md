@@ -33,12 +33,7 @@ nohup python3 login.py &
 使用 `--campus shaoxing` 选择绍兴门户 `https://yue.hdu.edu.cn`，接入控制器 ID 为 `1`。
 不指定校区时，保持原有下沙校区门户和认证方式。
 
-账号密码仅从本地 `auth.json` 读取，不需要写入程序；该文件已被 Git 和 Docker 构建上下文忽略。
-请自行创建配置，不要提交真实凭据，并限制文件权限：
-
 ```bash
-chmod 600 auth.json
-
 # 只查询在线状态，不读取账号配置，不登录或注销
 python3 login.py --campus shaoxing --check
 
@@ -49,7 +44,6 @@ python3 login.py --campus shaoxing --once
 nohup python3 login.py --campus shaoxing &
 ```
 
-配置文件本身仍保存明文凭据，请妥善保护；程序不主动记录账号密码或完整认证响应。
 `--once` 执行一轮登录流程后退出，保留原有的 `ac_id` 自动重试策略。
 登录流程和只读检查成功时退出码为 `0`，失败时为非零；已在线状态下的登录结果不能代替离线登录验证。
 绍兴校区已实际验证单次登录返回 `login_ok`；长期保活、六小时账号切换及下沙校区回归仍需进一步验证。
