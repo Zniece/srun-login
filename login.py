@@ -1,5 +1,7 @@
+from argparse import ArgumentParser
 from datetime import datetime
 from hashlib import sha1
+from ipaddress import IPv4Address
 from json import loads, dumps, load
 from random import choice
 from re import compile
@@ -18,6 +20,26 @@ from utils.xencode import xencode
 AUTH_FILE = "auth.json"
 INVALID_AUTH_ERROR = "4xx"
 RETRY_DELAY = 2
+CAMPUS = "xiasha"
+CAMPUS_CONFIGS = {
+    "xiasha": {
+        "hosts": [
+            "https://login.hdu.edu.cn", "https://portal.hdu.edu.cn",
+            "http://192.168.112.30", "http://192.168.112.97"
+        ],
+        "ac_id": 0,
+    },
+    "shaoxing": {"hosts": ["https://yue.hdu.edu.cn"], "ac_id": 1},
+}
+
+
+def parse_jsonp(text: str, callback: str) -> dict:
+    text = text.strip().removesuffix(";").rstrip()
+    prefix = callback + "("
+    if text.startswith(prefix) and text.endswith(")"):
+        text = text[len(prefix):-1]
+    return loads(text)
+
 
 headers = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 "
@@ -28,9 +50,11 @@ auths = []
 
 class Manager(Session):
 
-    def __init__(self, username: str = "", password: str = ""):
+    def __init__(self, username: str = "", password: str = "", campus: str = None):
         super().__init__()
-        self.acid: int = 0
+        self.campus = campus or CAMPUS
+        self.config = CAMPUS_CONFIGS[self.campus]
+        self.acid: int = self.config["ac_id"]
         self.n: str = "200"
         self.vtype: str = "1"
         self.enc_ver: str = "srun_bx1"
@@ -41,12 +65,10 @@ class Manager(Session):
         self.token, self.checksum, self.info = None, None, None
 
     def get_host(self):
-        hosts = [
-            "https://login.hdu.edu.cn", "https://portal.hdu.edu.cn", "http://192.168.112.30", "http://192.168.112.97"
-        ]
+        hosts = self.config["hosts"]
         for i in hosts:
             try:
-                self.get(i)
+                self.get(i, timeout=10).raise_for_status()
                 return i
             except Exception as e:
                 self.logger.info(f"Host {i} {e}")
@@ -54,7 +76,17 @@ class Manager(Session):
         exit(-1)
 
     def get_ip(self) -> str:
-        resp = self.get(self.host + f"/srun_portal_pc", headers=headers).text
+        if self.campus == "shaoxing":
+            response = self.get(
+                self.host + "/srun_portal_pc", headers=headers,
+                params={"ac_id": self.acid, "theme": "hdu-yue"}, timeout=10
+            )
+            response.raise_for_status()
+            match = compile(r'''\bip\s*:\s*["']([0-9.]+)["']''').search(response.text)
+            if match is None:
+                raise ValueError("Failed to find client IP in Shaoxing portal page")
+            return str(IPv4Address(match.group(1)))
+        resp = self.get(self.host + "/srun_portal_pc", headers=headers, timeout=10).text
         try:
             ip = compile(r'((1\d{2}|25[0-5]|2[0-4]\d|[1-9]?\d)\.){3}(25[0-5]|2[0-4]\d|1\d{2}|[1-9]?\d)').search(
                 resp).group()
@@ -71,11 +103,8 @@ class Manager(Session):
             "ip": self.get_ip(),
             "_": round(time() * 1000)
         }
-        resp = self.get(self.host + "/cgi-bin/get_challenge", headers=headers, params=params).text.strip(
-            callback + "()")
-        self.logger.debug(resp)
-        token = loads(resp)["challenge"]
-        self.logger.info(f"Token: {token}")
+        resp = self.get(self.host + "/cgi-bin/get_challenge", headers=headers, params=params, timeout=10).text
+        token = parse_jsonp(resp, callback)["challenge"]
         return token
 
     def get_info(self) -> str:
@@ -119,14 +148,14 @@ class Manager(Session):
             "type": self.vtype,
             "_": round(time() * 1000)
         }
-        resp = self.get(self.host + "/cgi-bin/srun_portal", headers=headers, params=params).text
-        result: dict = loads(resp.strip(callback + "()"))
-        self.logger.debug(result)
+        resp = self.get(self.host + "/cgi-bin/srun_portal", headers=headers, params=params, timeout=10).text
+        result = parse_jsonp(resp, callback)
         if result.get("suc_msg"):
-            self.logger.success(f'login: {result["suc_msg"]} {self.username} {self.password} {result.get("online_ip")}')
+            self.logger.success(f'login: {result["suc_msg"]}')
         else:
-            self.logger.error(f'{result.get("error")}: {result.get("error_msg")}')
-            if "BAS" in result.get("error_msg") or "Nas" in result.get("error_msg"):
+            self.logger.error(f'login failed: {result.get("error")}')
+            error_message = result.get("error_msg") or ""
+            if "BAS" in error_message or "Nas" in error_message:
                 """
                 INFO failed, BAS respond timeout.
                 Nas type not found.
@@ -135,14 +164,14 @@ class Manager(Session):
                 self.acid += 1
                 sleep(5)
                 result = self.login()
-            elif "E2901" in result.get("error_msg"):
+            elif "E2901" in error_message:
                 """
                 E2901: (Third party -200)ldap_first_entry error
                 E2901: (Third party 1)bind_user2: ldap_bind error
                 """
                 self.logger.error("username or password error...")
                 result["error_msg"] = "4xx"
-            elif "E2606" in result.get("error_msg"):
+            elif "E2606" in error_message:
                 """
                 E2606: User is disabled.
                 """
@@ -165,9 +194,8 @@ class Manager(Session):
             "sign": sha1(f"{t}{username}{ip}1{t}".encode()).hexdigest(),
             "_": round(time() * 1000)
         }
-        resp = self.get(self.host + "/cgi-bin/rad_user_dm", headers=headers, params=params).text
-        result: dict = loads(resp.strip(callback + "()"))
-        self.logger.debug(result)
+        resp = self.get(self.host + "/cgi-bin/rad_user_dm", headers=headers, params=params, timeout=10).text
+        result = parse_jsonp(resp, callback)
         self.logger.info(f'logout: {result.get("error")}')
         return result
 
@@ -177,9 +205,8 @@ class Manager(Session):
             "callback": callback,
             "_": round(time() * 1000)
         }
-        resp = self.get(self.host + "/cgi-bin/rad_user_info", headers=headers, params=params).text
-        result: dict = loads(resp.strip(callback + "()"))
-        self.logger.debug(result)
+        resp = self.get(self.host + "/cgi-bin/rad_user_info", headers=headers, params=params, timeout=10).text
+        result = parse_jsonp(resp, callback)
         self.logger.info(f'check: {result.get("error")}')
         return result
 
@@ -252,11 +279,25 @@ def start_scheduler():
 
 
 def main():
-    global auths
+    global auths, CAMPUS
+    parser = ArgumentParser(description="HDU campus network login")
+    parser.add_argument("--campus", choices=CAMPUS_CONFIGS, default="xiasha")
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument("--check", action="store_true", help="Check online status without logging in or out")
+    modes.add_argument("--once", action="store_true", help="Run the login flow without logging out or scheduling jobs")
+    args = parser.parse_args()
+    CAMPUS = args.campus
     setup_logger()
+    if args.check:
+        result = Manager().check()
+        return 0 if result.get("error") == "ok" else 1
     auths = load_auths()
+    if args.once:
+        result = Manager(*get_random_auth()).login()
+        return 0 if result.get("suc_msg") else 1
     start_scheduler()
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
