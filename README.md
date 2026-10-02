@@ -48,6 +48,33 @@ nohup python3 login.py --campus shaoxing &
 登录流程和只读检查成功时退出码为 `0`，失败时为非零；已在线状态下的登录结果不能代替离线登录验证。
 绍兴校区已实际验证单次登录返回 `login_ok`；长期保活、六小时账号切换及下沙校区回归仍需进一步验证。
 
+### 断网后自动认证（Windows / Linux / macOS）
+
+新增独立脚本 `reconnect.py`，复用原登录程序，不修改原定时任务。
+将 `auth.json` 放在脚本所在目录，安装原项目依赖后运行：
+
+```bash
+python reconnect.py --campus shaoxing
+```
+
+默认每 15 秒检测一次公网连通性，连续失败 3 次后查询校园网在线状态；
+仅当门户明确返回 `not_online_error` 时才执行登录，不主动注销。
+门户仍报告在线、无法访问门户或返回其他错误时，不执行登录。
+每轮认证最长 60 秒，结束后至少等待 60 秒再尝试下一轮。
+日志写入脚本目录的 `reconnect.log`，原登录日志仍写入 `srun_login.log`。
+
+```bash
+python reconnect.py --campus shaoxing --interval 15 --failures 3 --cooldown 60 --login-timeout 60
+```
+
+Windows 任务计划程序可使用虚拟环境的 `python.exe` 启动 `reconnect.py --campus shaoxing`。
+不要同时运行原 `login.py` 的常驻任务，避免其六小时刷新主动注销或并发认证。
+公网检测使用微软连通性检测地址，并校验响应正文；该检测不使用环境代理。
+单个检测地址不可达不一定代表整体断网，因此会进一步核对门户状态。
+本脚本只能恢复校园网认证，不能重新连接已断开的 Wi-Fi 或修复物理网络故障。
+检测和认证均失败时继续等待，不会退出；按 Ctrl+C 停止。
+Docker 使用时需自行将 `reconnect.py` 加入镜像，现有 Dockerfile 不包含该脚本。
+
 ### Docker 运行
 
 ```bash
